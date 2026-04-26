@@ -1,29 +1,51 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import dynamic from "next/dynamic";
 import { MOCK_INCIDENTS as initialData, Incident } from "../lib/mock-data";
+
+// Dynamically import the map to prevent Server-Side Rendering crashes
+const LiveMap = dynamic(() => import("../components/LiveMap"), { 
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-full flex flex-col items-center justify-center text-slate-500 bg-[#0b0f1a]">
+      <span className="text-4xl animate-pulse mb-4">🛰️</span>
+      <div className="animate-pulse font-medium tracking-wide">Initializing Geospatial Layer...</div>
+    </div>
+  )
+});
 
 export default function Dashboard() {
   const [incidents, setIncidents] = useState<Incident[]>(initialData);
   const [isUploading, setIsUploading] = useState(false);
-  
-  // NEW: State for our manual entry form
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [manualText, setManualText] = useState("");
+  
+  // Cooldown state
+  const [cooldown, setCooldown] = useState(0);
 
-  // The central function to send ANY file to the AI
+  // The Timer Engine
+  useEffect(() => {
+    if (cooldown > 0) {
+      const timerId = setTimeout(() => setCooldown(cooldown - 1), 1000);
+      return () => clearTimeout(timerId);
+    }
+  }, [cooldown]);
+
   const processWithAI = async (file: File) => {
     setIsUploading(true);
     const formData = new FormData();
     formData.append("file", file);
 
     try {
-      const response = await fetch("http://localhost:8000/extract-incident", {
+      const response = await fetch("http://10.50.0.52:8000/extract-incident", {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) throw new Error("AI Service is offline.");
+      if (!response.ok) {
+        throw new Error(`Server returned status: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -39,33 +61,33 @@ export default function Dashboard() {
 
       setIncidents((prev) => [newIncident, ...prev]);
       
-      // Close and clear the form on success
-      setIsFormOpen(false);
-      setManualText("");
+      // If the AI triggers our Fallback System Alert, start the 60s cooldown!
+      if (data.summary.includes("SYSTEM ALERT")) {
+        setCooldown(60);
+      } else {
+        // Only close the form if it was a successful, real generation
+        setIsFormOpen(false);
+        setManualText("");
+      }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Connection Error:", error);
-      alert("Error: Could not reach the AI Service.");
+      alert(`AI Extraction Failed: ${error.message}`);
     } finally {
       setIsUploading(false);
     }
   };
 
-  // Handler for traditional file uploads (Images/Existing Docs)
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) processWithAI(file);
-    event.target.value = ""; // reset input
+    event.target.value = ""; 
   };
 
-  // NEW: Handler for manual text entry
   const handleManualSubmit = () => {
-    if (!manualText.trim()) return;
-    
-    // The Trick: Convert typed text into a virtual .txt file in memory!
+    if (!manualText.trim() || cooldown > 0) return;
     const blob = new Blob([manualText], { type: "text/plain" });
     const virtualFile = new File([blob], "dispatch-log.txt", { type: "text/plain" });
-    
     processWithAI(virtualFile);
   };
 
@@ -86,7 +108,6 @@ export default function Dashboard() {
           </div>
           <p className="text-xs text-slate-400 uppercase tracking-widest mb-6">Incident Intelligence</p>
           
-          {/* NEW: The Interactive Input Area */}
           {!isFormOpen ? (
             <button 
               onClick={() => setIsFormOpen(true)}
@@ -97,37 +118,48 @@ export default function Dashboard() {
           ) : (
             <div className="bg-slate-800 rounded-xl border border-slate-600 p-3 shadow-inner animate-in fade-in slide-in-from-top-2 duration-200">
               <textarea 
-                placeholder="Type dispatch details here... (e.g., '12 trapped in factory fire on 5th street')"
-                className="w-full bg-slate-900 text-sm p-3 rounded-lg border border-slate-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none h-24 mb-3 placeholder:text-slate-600"
+                placeholder="Type dispatch details here..."
+                className={`w-full bg-slate-900 text-sm p-3 rounded-lg border focus:ring-1 outline-none resize-none h-24 mb-3 placeholder:text-slate-600 transition-colors ${
+                  cooldown > 0 ? 'border-red-900/50 text-slate-500 cursor-not-allowed focus:border-red-900 focus:ring-red-900' : 'border-slate-700 focus:border-blue-500 focus:ring-blue-500'
+                }`}
                 value={manualText}
                 onChange={(e) => setManualText(e.target.value)}
-                disabled={isUploading}
+                disabled={isUploading || cooldown > 0}
               />
               
               <div className="flex gap-2">
-                {/* Submit Text Button */}
+                {/* The Dynamic Cooldown Button */}
                 <button 
                   onClick={handleManualSubmit}
-                  disabled={isUploading || !manualText.trim()}
+                  disabled={isUploading || !manualText.trim() || cooldown > 0}
                   className={`flex-1 py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-2 transition-all ${
-                    isUploading || !manualText.trim() ? 'bg-slate-700 text-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-500 text-white shadow-lg'
+                    cooldown > 0 
+                      ? 'bg-red-950 text-red-500 cursor-not-allowed border border-red-900/50' 
+                      : isUploading || !manualText.trim() 
+                        ? 'bg-slate-700 text-slate-400 cursor-not-allowed' 
+                        : 'bg-green-600 hover:bg-green-500 text-white shadow-lg'
                   }`}
                 >
-                  {isUploading ? "🤖 ANALYZING..." : "SEND TO AI"}
+                  {cooldown > 0 
+                    ? `⏳ SYSTEM LOCKED (${cooldown}s)` 
+                    : isUploading 
+                      ? "🤖 ANALYZING..." 
+                      : "SEND TO AI"}
                 </button>
 
-                {/* Upload Image/File Button */}
-                <label className={`px-4 py-2 rounded-lg text-[10px] font-bold flex items-center justify-center transition-all cursor-pointer ${
-                  isUploading ? 'bg-slate-700 text-slate-500' : 'bg-slate-700 hover:bg-slate-600 text-white'
+                <label className={`px-4 py-2 rounded-lg text-[10px] font-bold flex items-center justify-center transition-all ${
+                  isUploading || cooldown > 0 ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white cursor-pointer'
                 }`}>
                   📁 FILE
-                  <input type="file" className="hidden" onChange={handleFileUpload} disabled={isUploading} accept="image/*,text/plain" />
+                  <input type="file" className="hidden" onChange={handleFileUpload} disabled={isUploading || cooldown > 0} accept="image/*,text/plain" />
                 </label>
                 
-                {/* Cancel Button */}
                 <button 
-                  onClick={() => setIsFormOpen(false)}
-                  disabled={isUploading}
+                  onClick={() => {
+                    setIsFormOpen(false);
+                    setManualText("");
+                  }}
+                  disabled={isUploading || cooldown > 0}
                   className="px-3 py-2 text-slate-400 hover:text-white transition-colors"
                 >
                   ✕
@@ -137,25 +169,24 @@ export default function Dashboard() {
           )}
         </div>
         
-        {/* Incident List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
           {incidents.map((incident) => (
-            <div key={incident.id} className={`p-4 rounded-xl border transition-all hover:border-slate-500 group ${incident.urgency > 8 ? 'border-red-500/40 bg-red-500/5 hover:bg-red-500/10' : 'border-slate-700 bg-slate-800/50 hover:bg-slate-800'}`}>
+            <div key={incident.id} className={`p-4 rounded-xl border transition-all hover:border-slate-500 group ${incident.summary.includes('SYSTEM ALERT') ? 'border-red-600 bg-red-950/30 animate-pulse' : incident.urgency > 8 ? 'border-red-500/40 bg-red-500/5 hover:bg-red-500/10' : 'border-slate-700 bg-slate-800/50 hover:bg-slate-800'}`}>
               <div className="flex justify-between items-start mb-2">
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tight ${incident.category === 'Flood' ? 'bg-blue-500/20 text-blue-400' : incident.category === 'Fire' ? 'bg-orange-500/20 text-orange-400' : 'bg-purple-500/20 text-purple-400'}`}>
-                  {incident.category}
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tight ${incident.summary.includes('SYSTEM ALERT') ? 'bg-red-600 text-white' : incident.category === 'Flood' ? 'bg-blue-500/20 text-blue-400' : incident.category === 'Fire' ? 'bg-orange-500/20 text-orange-400' : 'bg-purple-500/20 text-purple-400'}`}>
+                  {incident.summary.includes('SYSTEM ALERT') ? 'SYSTEM' : incident.category}
                 </span>
                 <span className="text-[10px] text-slate-500 font-medium">{incident.timestamp}</span>
               </div>
-              <p className="text-sm font-medium leading-relaxed text-slate-200 group-hover:text-white transition-colors">{incident.summary}</p>
+              <p className={`text-sm font-medium leading-relaxed transition-colors ${incident.summary.includes('SYSTEM ALERT') ? 'text-red-400' : 'text-slate-200 group-hover:text-white'}`}>{incident.summary}</p>
               <div className="mt-4 flex items-center justify-between text-[11px]">
                 <div className="flex items-center gap-1 text-slate-400">
                   <span>📍</span>
                   <span className="truncate w-32 font-medium">{incident.location_context}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`font-mono font-bold px-1.5 py-0.5 rounded ${incident.urgency > 8 ? 'text-red-400 bg-red-400/10' : 'text-slate-300 bg-slate-700'}`}>
-                    {incident.urgency}/10
+                  <span className={`font-mono font-bold px-1.5 py-0.5 rounded ${incident.summary.includes('SYSTEM ALERT') ? 'text-red-300 bg-red-900' : incident.urgency > 8 ? 'text-red-400 bg-red-400/10' : 'text-slate-300 bg-slate-700'}`}>
+                    {incident.summary.includes('SYSTEM ALERT') ? 'ERR' : `${incident.urgency}/10`}
                   </span>
                 </div>
               </div>
@@ -164,25 +195,18 @@ export default function Dashboard() {
         </div>
       </aside>
 
-      {/* Main Map View Placeholder */}
-      <main className="flex-1 relative bg-[#0b0f1a] flex items-center justify-center overflow-hidden">
-        <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(#334155 1px, transparent 1px)', backgroundSize: '30px 30px' }}></div>
-        <div className="text-center relative z-10 px-6">
-          <div className="w-20 h-20 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-6 border border-blue-500/20 shadow-[0_0_50px_-12px_rgba(59,130,246,0.5)]">
-            <span className="text-4xl animate-pulse">🛰️</span>
-          </div>
-          <h2 className="text-2xl font-bold tracking-tight text-slate-100">Geospatial Intelligence Layer</h2>
-          <p className="text-slate-400 text-sm mt-3 max-w-sm mx-auto leading-relaxed">
-            Real-time satellite tracking and coordinate mapping. <br/>
-            Waiting for PostGIS database synchronization...
-          </p>
-        </div>
-        <div className="absolute bottom-8 right-8 flex gap-4">
-          <div className="bg-slate-900/80 backdrop-blur-md px-6 py-4 rounded-2xl border border-slate-700/50 shadow-2xl">
+      {/* Main Map View */}
+      <main className="flex-1 relative bg-[#0b0f1a] flex items-center justify-center overflow-hidden z-0">
+        
+        {/* THE NEW LIVE MAP */}
+        <LiveMap incidents={incidents} />
+
+        <div className="absolute bottom-8 right-8 flex gap-4 pointer-events-none z-10">
+          <div className="bg-slate-900/80 backdrop-blur-md px-6 py-4 rounded-2xl border border-slate-700/50 shadow-2xl pointer-events-auto">
             <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1 text-center">Impacted Souls</p>
             <p className="text-3xl font-bold text-blue-400 text-center tabular-nums">{incidents.reduce((acc, curr) => acc + curr.affected_people, 0)}</p>
           </div>
-          <div className="bg-slate-900/80 backdrop-blur-md px-6 py-4 rounded-2xl border border-slate-700/50 shadow-2xl">
+          <div className="bg-slate-900/80 backdrop-blur-md px-6 py-4 rounded-2xl border border-slate-700/50 shadow-2xl pointer-events-auto">
             <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1 text-center">Open Cases</p>
             <p className="text-3xl font-bold text-orange-400 text-center tabular-nums">{incidents.length.toString().padStart(2, '0')}</p>
           </div>
